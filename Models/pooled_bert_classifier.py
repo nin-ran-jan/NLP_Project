@@ -85,16 +85,22 @@ class CustomDataset(Dataset):
 from transformers import BertModel
 
 
-class BertSeqClassifier(nn.Module):
+class BertSeqPoolClassifier(nn.Module):
     def __init__(self):
-        super(BertSeqClassifier, self).__init__()
+        super(BertSeqPoolClassifier, self).__init__()
         self.bert = BertModel.from_pretrained("bert-base-uncased")
-        self.linear_layer = nn.Linear(768, 3)
+        self.linear_layer = nn.LazyLinear(3)
+        self.pooling_layer = nn.AvgPool1d(384, stride=192)
+        self.relu = nn.ReLU()
         # self.soft_max = nn.Softmax(dim=3) 
 
     def forward(self, input_ids, bert_mask):
-        _, pooled_output = self.bert(input_ids=input_ids, attention_mask=bert_mask, return_dict=False)
-        linear_output = self.linear_layer(pooled_output)
+        seq_last_hidden_states, pooled_output = self.bert(input_ids=input_ids, attention_mask=bert_mask, return_dict=False)
+        # print("SEQ SHAPE: ", seq_last_hidden_states.shape) 
+        # print("Pool Shape: ", pooled_output.shape)
+        pooled_hidden_states = self.pooling_layer(seq_last_hidden_states)
+        pooled_hidden_states = pooled_hidden_states.reshape(pooled_output.shape[0], -1)
+        linear_output = self.relu(self.linear_layer(pooled_hidden_states))
         # probs = self.soft_max(linear_output) # already incorporated in crossentropyLoss
         # return probs
         return linear_output
@@ -116,6 +122,7 @@ def train(model, train_data, test_data, learning_rate_bert, learning_rate_lin, e
     train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_dataloader = DataLoader(test_data, batch_size=batch_size)
     
+    best_score = 0.769
     
     for epoch in tqdm(range(epochs)):
 
@@ -196,9 +203,13 @@ def train(model, train_data, test_data, learning_rate_bert, learning_rate_lin, e
         print(f"Macro F1 Score Train: {f1_score(train_data.getLabels(), train_preds, average='macro')}")
         print(f"F1 Score Test: {f1_score(test_data.getLabels(), test_preds, average=None)}")
         print(f"Macro F1 Score Test: {f1_score(test_data.getLabels(), test_preds, average='macro')}")
+        curr_score = f1_score(test_data.getLabels(), test_preds, average='macro') 
 
-        # save best Model 
-        
+        if curr_score > best_score:
+            best_score = curr_score
+            torch.save(model, "./pooled-bert-3-best.pth")
+        # save best model
+
 
 # !nvidia-smi
 
@@ -213,10 +224,10 @@ torch.cuda.get_device_name(torch.cuda.current_device())
 #     exit()
     # print(row['tweet'])
 
-# model = BertSeqClassifier()
+# model = BertSeqPoolClassifier()
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
-model = torch.load("/ssd-scratch/vibhu20150/temp/trained-model-states.pth")
+model = torch.load("/ssd-scratch/vibhu20150/temp/pooled-bert-3-best.pth")
 
 print(len([para for para in model.parameters()]))
 print(len([para for para in model.bert.parameters()]))
@@ -238,13 +249,13 @@ labels_map = {0: "hate?",
 
 
 
-train_data = CustomDataset(train_dataset, tokenizer, "hate") 
+train_data = CustomDataset(train_dataset[:15860], tokenizer) 
 test_data = CustomDataset(train_dataset[15860:], tokenizer)
 
 print("TRAIN LENGTH: ", len(train_data))
 
-train(model, train_data, test_data, 0.0000001, 0.000001, 2, device)
+train(model, train_data, test_data, 0.00001, 0.001, 3, device)
 
 
 # torch.save(model.state_dict(), "./trained-model-states.pth")
-torch.save(model, "./trained-model-BERT-3-8020-hatefinetune.pth")
+# torch.save(model, "./pooled-bert-3.pth")

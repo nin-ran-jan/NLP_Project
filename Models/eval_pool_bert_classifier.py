@@ -68,16 +68,22 @@ class CustomTestDataset(Dataset):
 from transformers import BertModel
 
 
-class BertSeqClassifier(nn.Module):
+class BertSeqPoolClassifier(nn.Module):
     def __init__(self):
-        super(BertSeqClassifier, self).__init__()
+        super(BertSeqPoolClassifier, self).__init__()
         self.bert = BertModel.from_pretrained("bert-base-uncased")
-        self.linear_layer = nn.Linear(768, 3)
+        self.linear_layer = nn.LazyLinear(3)
+        self.pooling_layer = nn.AvgPool1d(384, stride=192)
+        self.relu = nn.ReLU()
         # self.soft_max = nn.Softmax(dim=3) 
 
     def forward(self, input_ids, bert_mask):
-        _, pooled_output = self.bert(input_ids=input_ids, attention_mask=bert_mask, return_dict=False)
-        linear_output = self.linear_layer(pooled_output)
+        seq_last_hidden_states, pooled_output = self.bert(input_ids=input_ids, attention_mask=bert_mask, return_dict=False)
+        # print("SEQ SHAPE: ", seq_last_hidden_states.shape) 
+        # print("Pool Shape: ", pooled_output.shape)
+        pooled_hidden_states = self.pooling_layer(seq_last_hidden_states)
+        pooled_hidden_states = pooled_hidden_states.reshape(pooled_output.shape[0], -1)
+        linear_output = self.relu(self.linear_layer(pooled_hidden_states))
         # probs = self.soft_max(linear_output) # already incorporated in crossentropyLoss
         # return probs
         return linear_output
@@ -138,7 +144,7 @@ print(device)
 torch.cuda.current_device()
 torch.cuda.get_device_name(torch.cuda.current_device())
 
-model = torch.load("/ssd-scratch/vibhu20150/temp/trained-model-BERT-3-8020-hatefinetune.pth")
+model = torch.load("/ssd-scratch/vibhu20150/temp/pooled-bert-3-best.pth")
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
 print(len([para for para in model.parameters()]))
