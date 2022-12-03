@@ -27,15 +27,8 @@ from sklearn.metrics import f1_score
 # dataset = np.array(pd.read_csv('/content/drive/MyDrive/NLP_Project_sem5/processed_data.csv'))
 # dataset = pd.read_csv('/content/drive/MyDrive/NLP_Project_sem5/processed_data.csv')
 
-# train_dataset = pd.read_csv('/ssd-scratch/vibhu20150/temp/Datasets-Processed/H3_Multiclass_Hate_Speech_Detection_train_preprocessed.csv')
-# test_dataset = pd.read_csv('/ssd-scratch/vibhu20150/temp/Datasets-Processed/H3_Multiclass_Hate_Speech_Detection_test_preprocessed.csv')
-# hate_aug_dataset = pd.read_csv('/ssd-scratch/vibhu20150/temp/Datasets-Processed/HateSpeech_Augmented_NEW.csv')
-# neither_aug_dataset = pd.read_csv('/ssd-scratch/vibhu20150/temp/Datasets-Processed/Neither_Augmented_NEW.csv') 
-
-train_dataset = pd.read_csv('/raid/home/vibhu20150/temp/Datasets-Processed/H3_Multiclass_Hate_Speech_Detection_train_preprocessed.csv')
-test_dataset = pd.read_csv('/raid/home/vibhu20150/temp/Datasets-Processed/H3_Multiclass_Hate_Speech_Detection_test_preprocessed.csv')
-hate_aug_dataset = pd.read_csv('/raid/home/vibhu20150/temp/Datasets-Processed/HateSpeech_Augmented_NEW.csv')
-neither_aug_dataset = pd.read_csv('/raid/home/vibhu20150/temp/Datasets-Processed/Neither_Augmented_NEW.csv') 
+train_dataset = pd.read_csv('/ssd-scratch/vibhu20150/temp/Datasets-Processed/H3_Multiclass_Hate_Speech_Detection_train_preprocessed.csv')
+test_dataset = pd.read_csv('/ssd-scratch/vibhu20150/temp/Datasets-Processed/H3_Multiclass_Hate_Speech_Detection_test_preprocessed.csv')
 
 print(train_dataset)
 print(test_dataset)
@@ -47,22 +40,25 @@ print(test_dataset.shape)
 # print(dataset[0,2])
 print(test_dataset)
 
+# num_labels = 3
+# tokenizer = BertTokenizer.from_pretrained("textattack/bert-base-uncased-yelp-polarity")
 
-    
+# model = BertForSequenceClassification.from_pretrained("textattack/bert-base-uncased-yelp-polarity", problem_type="multi_label_classification", )
+
+# print(model.config.id2label)
 
 
 
 from torch.utils.data import Dataset
 
 class CustomDataset(Dataset):
-    def __init__(self, dataset, aug_hate, aug_neither, num_hate, num_neither ,tokenizer, class_type="all"):
-        self.labels = [label for label in dataset['label']]
-        self.tweets = [tokenizer(tweet, max_length=512, padding='max_length', truncation=True, return_tensors="pt") for tweet in dataset['tweet']]
-        self.labels.extend(list(aug_hate['label'])[:num_hate])
-        self.tweets.extend([tokenizer(tweet, max_length=512, padding='max_length', truncation=True, return_tensors="pt") for tweet in aug_hate['tweet'][:num_hate]])
-        self.labels.extend(list(aug_neither['label'])[:num_neither])
-        self.tweets.extend([tokenizer(tweet, max_length=512, padding='max_length', truncation=True, return_tensors="pt") for tweet in aug_neither['tweet'][:num_neither]])
-
+    def __init__(self, dataset, tokenizer, class_type="all"):
+        if class_type == "all":
+            self.labels = [label for label in dataset['label']]
+            self.tweets = [tokenizer(tweet, max_length=280, padding='max_length', truncation=True, return_tensors="pt") for tweet in dataset['tweet']]
+        elif class_type == "hate":
+            self.labels = [label for label in dataset['label'] if label == 0]
+            self.tweets = [tokenizer(row[1], max_length=280, padding='max_length', truncation=True, return_tensors="pt") for row in np.array(dataset) if row[0] == 0] 
 
 
     def __len__(self):
@@ -85,24 +81,51 @@ class BertSeqPoolLinClassifier(nn.Module):
     def __init__(self):
         super(BertSeqPoolLinClassifier, self).__init__()
         self.bert = BertModel.from_pretrained("bert-base-uncased")
-        self.linear_layer_1 = nn.LazyLinear(100)
         self.linear_layer = nn.LazyLinear(3)
 
-        self.pooling_layer = nn.AvgPool1d(384, stride=192)
+        # self.pooling_layer = nn.AvgPool1d(384, stride=192)
+        self.pooling_layer = nn.AvgPool1d(8, stride=8)
+        self.conv_layer = nn.Conv1d(in_channels=280, out_channels=100, kernel_size=10, stride=8)
+        self.conv_layer_2d = nn.Conv2d(in_channels=13, out_channels=13, kernel_size=(5,280))
+        self.avg_pool_2d = nn.AvgPool2d((5,5), stride=(4,4))
+        self.lin_layer_all = nn.Linear(768, 384)
+        self.lin_layer_reduction = nn.LazyLinear(384)
         self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
         self.tan_h = nn.Tanh()
+        self.dropout = nn.Dropout(0.1)
+
         # self.soft_max = nn.Softmax(dim=3) 
 
     def forward(self, input_ids, bert_mask):
-        seq_last_hidden_states, pooled_output = self.bert(input_ids=input_ids, attention_mask=bert_mask, return_dict=False)
+        seq_last_hidden_states, pooled_output, all_hidden_layers = self.bert(input_ids=input_ids, attention_mask=bert_mask, return_dict=False, output_hidden_states=True)
+        # print(f"output hidden states shape:   {all_hidden_layers[0].shape}, {all_hidden_layers[0].shape}, {len(all_hidden_layers)}")
         # print("SEQ SHAPE: ", seq_last_hidden_states.shape) 
         # print("Pool Shape: ", pooled_output.shape)
-        pooled_hidden_states = self.pooling_layer(seq_last_hidden_states)
-        pooled_hidden_states = pooled_hidden_states.reshape(pooled_output.shape[0], -1)
-        linear_output_1 = self.tan_h(self.linear_layer_1(pooled_hidden_states))
-        linear_output = self.relu(self.linear_layer(linear_output_1))
-        # probs = self.soft_max(linear_output) # already incorporated in crossentropyLoss
-        # return probs
+        # pooled_hidden_states = self.pooling_layer(seq_last_hidden_states)
+        seq_last_hidden_states = self.dropout(seq_last_hidden_states) 
+        # conv_output = self.conv_layer(seq_last_hidden_states)
+        
+        # print("DONE")
+        combined_hidden_layers = torch.cat([hidden_layer.unsqueeze(0) for hidden_layer in all_hidden_layers], dim=0)
+        combined_hidden_layers = combined_hidden_layers.permute((1, 0, 2, 3))
+        lin_combined_hidden_layers = self.lin_layer_all(combined_hidden_layers) 
+        lin_combined_hidden_layers = self.dropout(lin_combined_hidden_layers)
+        conv2d_output = self.conv_layer_2d(lin_combined_hidden_layers)
+        
+        # print(f"combine layers shape: {combined_hidden_layers.shape}")
+        # print(f"lin combine layers shape: {lin_combined_hidden_layers.shape}")
+        # print(f"conv combine layers shape: {conv2d_output.shape}")
+        conv2d_output = self.avg_pool_2d(conv2d_output)
+        conv2d_output = conv2d_output.reshape(conv2d_output.shape[0], conv2d_output.shape[1], -1)
+
+        # conv 2d 
+
+        # print("Conv output: ", conv_output.shape)
+        conv2d_output = conv2d_output.reshape(pooled_output.shape[0], -1)
+        linear_output = self.relu(conv2d_output)
+        linear_output = self.relu(self.linear_layer(linear_output))
+
         return linear_output
 
 from tqdm import tqdm
@@ -113,8 +136,11 @@ def train(model, train_data, test_data, learning_rate_bert, learning_rate_lin, e
     loss_function = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW([
         {'params': model.bert.parameters(), 'lr': learning_rate_bert},
-        {'params': model.linear_layer_1.parameters()},
-        {'params': model.linear_layer.parameters()}
+        {'params': model.linear_layer.parameters()},
+        # {'params': model.conv_layer.parameters()},
+        {'params': model.conv_layer_2d.parameters()},
+        {'params': model.lin_layer_all.parameters()},
+        {'params': model.lin_layer_reduction.parameters()}
         ], lr=learning_rate_lin)
 
     if(device == "cuda"):
@@ -122,7 +148,7 @@ def train(model, train_data, test_data, learning_rate_bert, learning_rate_lin, e
         loss_function.cuda()
 
     
-    batch_size = 16
+    batch_size = 8
     train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_dataloader = DataLoader(test_data, batch_size=batch_size)
     
@@ -210,7 +236,7 @@ def train(model, train_data, test_data, learning_rate_bert, learning_rate_lin, e
 
         if curr_score > best_score:
             best_score = curr_score
-            torch.save(model, "./aug-pooled-bert-2-lin-3-best.pth")
+            torch.save(model, "./conv-bert-lin-relu-best.pth")
         # save best model
 
 
@@ -230,7 +256,7 @@ torch.cuda.get_device_name(torch.cuda.current_device())
 model = BertSeqPoolLinClassifier()
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
-# model = torch.load("/raid/home/vibhu20150/temp/pooled-bert-lin-3-best.pth")
+# model = torch.load("/ssd-scratch/vibhu20150/temp/pooled-bert-lin-3-best.pth")
 
 print(len([para for para in model.parameters()]))
 print(len([para for para in model.bert.parameters()]))
@@ -251,12 +277,13 @@ labels_map = {0: "hate?",
 # train_data = CustomDataset(train_dataset, tokenizer)
 
 
-train_data = CustomDataset(train_dataset[:17842], hate_aug_dataset, neither_aug_dataset, 2000, 100,tokenizer) 
-test_data = CustomDataset(train_dataset[17842:], hate_aug_dataset, neither_aug_dataset, 0, 0, tokenizer)
+
+train_data = CustomDataset(train_dataset[:17842], tokenizer) 
+test_data = CustomDataset(train_dataset[17842:], tokenizer)
 
 print("TRAIN LENGTH: ", len(train_data))
 
-train(model, train_data, test_data, 0.00002, 0.001, 3, device)
+train(model, train_data, test_data, 0.00001, 0.001, 30, device)
 
 
 # torch.save(model.state_dict(), "./trained-model-states.pth")

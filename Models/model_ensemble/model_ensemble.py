@@ -15,7 +15,7 @@ Original file is located at
 # drive.mount('/content/drive')
 
 import torch
-from transformers import BertTokenizer, BertForSequenceClassification 
+from transformers import BertTokenizer, BertModel 
 import pandas as pd
 import os
 from torch import nn
@@ -27,15 +27,10 @@ from sklearn.metrics import f1_score
 # dataset = np.array(pd.read_csv('/content/drive/MyDrive/NLP_Project_sem5/processed_data.csv'))
 # dataset = pd.read_csv('/content/drive/MyDrive/NLP_Project_sem5/processed_data.csv')
 
-# train_dataset = pd.read_csv('/ssd-scratch/vibhu20150/temp/Datasets-Processed/H3_Multiclass_Hate_Speech_Detection_train_preprocessed.csv')
-# test_dataset = pd.read_csv('/ssd-scratch/vibhu20150/temp/Datasets-Processed/H3_Multiclass_Hate_Speech_Detection_test_preprocessed.csv')
-# hate_aug_dataset = pd.read_csv('/ssd-scratch/vibhu20150/temp/Datasets-Processed/HateSpeech_Augmented_NEW.csv')
-# neither_aug_dataset = pd.read_csv('/ssd-scratch/vibhu20150/temp/Datasets-Processed/Neither_Augmented_NEW.csv') 
-
 train_dataset = pd.read_csv('/raid/home/vibhu20150/temp/Datasets-Processed/H3_Multiclass_Hate_Speech_Detection_train_preprocessed.csv')
 test_dataset = pd.read_csv('/raid/home/vibhu20150/temp/Datasets-Processed/H3_Multiclass_Hate_Speech_Detection_test_preprocessed.csv')
 hate_aug_dataset = pd.read_csv('/raid/home/vibhu20150/temp/Datasets-Processed/HateSpeech_Augmented_NEW.csv')
-neither_aug_dataset = pd.read_csv('/raid/home/vibhu20150/temp/Datasets-Processed/Neither_Augmented_NEW.csv') 
+
 
 print(train_dataset)
 print(test_dataset)
@@ -47,21 +42,16 @@ print(test_dataset.shape)
 # print(dataset[0,2])
 print(test_dataset)
 
-
-    
-
-
-
 from torch.utils.data import Dataset
 
 class CustomDataset(Dataset):
-    def __init__(self, dataset, aug_hate, aug_neither, num_hate, num_neither ,tokenizer, class_type="all"):
+    def __init__(self, dataset, aug_hate, num_hate, tokenizer):
         self.labels = [label for label in dataset['label']]
-        self.tweets = [tokenizer(tweet, max_length=512, padding='max_length', truncation=True, return_tensors="pt") for tweet in dataset['tweet']]
+        self.tweets = [tokenizer(tweet, max_length=250, padding='max_length', truncation=True, return_tensors="pt") for tweet in dataset['tweet']]
         self.labels.extend(list(aug_hate['label'])[:num_hate])
-        self.tweets.extend([tokenizer(tweet, max_length=512, padding='max_length', truncation=True, return_tensors="pt") for tweet in aug_hate['tweet'][:num_hate]])
-        self.labels.extend(list(aug_neither['label'])[:num_neither])
-        self.tweets.extend([tokenizer(tweet, max_length=512, padding='max_length', truncation=True, return_tensors="pt") for tweet in aug_neither['tweet'][:num_neither]])
+        self.tweets.extend([tokenizer(tweet, max_length=250, padding='max_length', truncation=True, return_tensors="pt") for tweet in aug_hate['tweet'][:num_hate]])
+        # self.labels.extend(list(aug_neither['label'])[:num_neither])
+        # self.tweets.extend([tokenizer(tweet, max_length=250, padding='max_length', truncation=True, return_tensors="pt") for tweet in aug_neither['tweet'][:num_neither]])
 
 
 
@@ -77,14 +67,46 @@ class CustomDataset(Dataset):
     def getLabels(self):
         return self.labels
 
+
+class CustomSingleDataset(Dataset):
+    def __init__(self, dataset, aug_hate, num_hate,tokenizer, class_type="hate"):
+        if class_type == "all":
+            self.labels = [label for label in dataset['label']]
+            self.tweets = [tokenizer(tweet, max_length=250, padding='max_length', truncation=True, return_tensors="pt") for tweet in dataset['tweet']]
+        elif class_type == "hate":
+            self.labels = [int(label==0) for label in dataset['label']]
+            self.tweets = [tokenizer(tweet, max_length=250, padding='max_length', truncation=True, return_tensors="pt") for tweet in dataset['tweet']]
+            self.labels.extend([1 for i in range(num_hate)])
+            self.tweets.extend([tokenizer(tweet, max_length=250, padding='max_length', truncation=True, return_tensors="pt") for tweet in aug_hate['tweet'][:num_hate]])
+        elif class_type == "offensive":
+            self.labels = [int(label==1) for label in dataset['label']]
+            self.tweets = [tokenizer(tweet, max_length=250, padding='max_length', truncation=True, return_tensors="pt") for tweet in dataset['tweet']]
+        elif class_type == "none":
+            self.labels = [int(label==2) for label in dataset['label']]
+            self.tweets = [tokenizer(tweet, max_length=250, padding='max_length', truncation=True, return_tensors="pt") for tweet in dataset['tweet']]
+            
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        tweet = self.tweets[idx]
+        label = self.labels[idx]
+
+        return tweet, label
+
+    def getLabels(self):
+        return self.labels
+
 # sequence classification/regression head on top a linear layer on top of the pooled output of BERT
-from transformers import BertModel
+from transformers import BertModel, RobertaTokenizer, RobertaModel
 
-
-class BertSeqPoolLinClassifier(nn.Module):
+class BertEnsembleClassifier(nn.Module):
     def __init__(self):
-        super(BertSeqPoolLinClassifier, self).__init__()
-        self.bert = BertModel.from_pretrained("bert-base-uncased")
+        super(BertEnsembleClassifier, self).__init__()
+        self.bert_hate = torch.load("/raid/home/vibhu20150/temp/model_ensemble/hate-model-bert.pth")
+        self.bert_offensive = torch.load("/raid/home/vibhu20150/temp/model_ensemble/offensive-model-bert.pth") 
+        self.bert_neither = torch.load("/raid/home/vibhu20150/temp/model_ensemble/none-model-bert.pth")
         self.linear_layer_1 = nn.LazyLinear(100)
         self.linear_layer = nn.LazyLinear(3)
 
@@ -94,12 +116,18 @@ class BertSeqPoolLinClassifier(nn.Module):
         # self.soft_max = nn.Softmax(dim=3) 
 
     def forward(self, input_ids, bert_mask):
-        seq_last_hidden_states, pooled_output = self.bert(input_ids=input_ids, attention_mask=bert_mask, return_dict=False)
+        seq_last_hidden_states_hate, _ = self.bert_hate(input_ids=input_ids, attention_mask=bert_mask, return_dict=False)
+        seq_last_hidden_states_offensive, _ = self.bert_offensive(input_ids=input_ids, attention_mask=bert_mask, return_dict=False)
+        seq_last_hidden_states_neither, _ = self.bert_neither(input_ids=input_ids, attention_mask=bert_mask, return_dict=False)
         # print("SEQ SHAPE: ", seq_last_hidden_states.shape) 
         # print("Pool Shape: ", pooled_output.shape)
-        pooled_hidden_states = self.pooling_layer(seq_last_hidden_states)
-        pooled_hidden_states = pooled_hidden_states.reshape(pooled_output.shape[0], -1)
-        linear_output_1 = self.tan_h(self.linear_layer_1(pooled_hidden_states))
+        seq_last_hidden_states_hate = self.pooling_layer(seq_last_hidden_states_hate).unsqueeze(dim=1)
+        seq_last_hidden_states_offensive = self.pooling_layer(seq_last_hidden_states_offensive).unsqueeze(dim=1)
+        seq_last_hidden_states_neither = self.pooling_layer(seq_last_hidden_states_neither).unsqueeze(dim=1)
+        concat_rep = torch.cat([seq_last_hidden_states_hate, seq_last_hidden_states_offensive, seq_last_hidden_states_neither], dim=1)
+        # print("Concat Shape: ", concat_rep.shape)
+        concat_rep = concat_rep.reshape(input_ids.shape[0], -1)
+        linear_output_1 = self.tan_h(self.linear_layer_1(concat_rep))
         linear_output = self.relu(self.linear_layer(linear_output_1))
         # probs = self.soft_max(linear_output) # already incorporated in crossentropyLoss
         # return probs
@@ -111,8 +139,11 @@ from torch.utils.data import DataLoader
 def train(model, train_data, test_data, learning_rate_bert, learning_rate_lin, epochs, device):
     model.train()
     loss_function = nn.CrossEntropyLoss()
+#     loss_function = nn.BCEWithLogitsLoss() # incorporates sigmoid in the loss itself, somehow helps in numeric stability or something vs normal BCE loss
     optimizer = torch.optim.AdamW([
-        {'params': model.bert.parameters(), 'lr': learning_rate_bert},
+        {'params': model.bert_hate.parameters(), 'lr': learning_rate_bert},
+        {'params': model.bert_offensive.parameters(), 'lr': learning_rate_bert},
+        {'params': model.bert_neither.parameters(), 'lr': learning_rate_bert},
         {'params': model.linear_layer_1.parameters()},
         {'params': model.linear_layer.parameters()}
         ], lr=learning_rate_lin)
@@ -122,7 +153,7 @@ def train(model, train_data, test_data, learning_rate_bert, learning_rate_lin, e
         loss_function.cuda()
 
     
-    batch_size = 16
+    batch_size = 8
     train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_dataloader = DataLoader(test_data, batch_size=batch_size)
     
@@ -137,13 +168,11 @@ def train(model, train_data, test_data, learning_rate_bert, learning_rate_lin, e
         for batch, (tweets, labels) in enumerate(train_dataloader):
             
             labels = labels.to(device)
-            # print()
-            # print("="*40)
-            # print()
-            # print(tweets["attention_mask"].shape)
-            # print()
+
             output = model(tweets["input_ids"].squeeze(1).to(device), tweets["attention_mask"].to(device))
             # print(f"label shape: {labels.shape}") # should be batch X 1
+            # print(output)
+            # print(labels)
             loss = loss_function(output, labels) 
             # print("output shape: ", output.shape)
             
@@ -210,53 +239,43 @@ def train(model, train_data, test_data, learning_rate_bert, learning_rate_lin, e
 
         if curr_score > best_score:
             best_score = curr_score
-            torch.save(model, "./aug-pooled-bert-2-lin-3-best.pth")
+            torch.save(model, "./ensemble-model-bert.pth")
         # save best model
 
 
 # !nvidia-smi
-
+# GPU ID
+torch.cuda.set_device(3)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(device)
 torch.cuda.current_device()
-torch.cuda.get_device_name(torch.cuda.current_device())
-# print()
-# for row in np.array(train_dataset)[:1]:
-#     print(row.shape)
-#     print(row[0], row[1])
-#     exit()
-    # print(row['tweet'])
 
-model = BertSeqPoolLinClassifier()
+torch.cuda.get_device_name(torch.cuda.current_device())
+
+
+model = BertEnsembleClassifier()
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
-# model = torch.load("/raid/home/vibhu20150/temp/pooled-bert-lin-3-best.pth")
+# model = torch.load("/ssd-scratch/vibhu20150/temp/pooled-bert-lin-3-best.pth")
 
 print(len([para for para in model.parameters()]))
-print(len([para for para in model.bert.parameters()]))
-print(len([para for para in model.linear_layer.parameters()]))
 
 labels_map = {0: "hate?",
               1: "offensive?",
               2: "none?",
               }
 
-# target = torch.empty(3, dtype=torch.long).random_(5)
-# print(target)
-# print(target.shape)
-# print(torch.device("cuda"))
-
-# print(dataset)
-# print(tokenizer)
-# train_data = CustomDataset(train_dataset, tokenizer)
 
 
-train_data = CustomDataset(train_dataset[:17842], hate_aug_dataset, neither_aug_dataset, 2000, 100,tokenizer) 
-test_data = CustomDataset(train_dataset[17842:], hate_aug_dataset, neither_aug_dataset, 0, 0, tokenizer)
+# train_data = CustomSingleDataset(train_dataset[:17842], hate_aug_dataset, 2270, tokenizer, "hate") 
+# test_data = CustomSingleDataset(train_dataset[17842:], hate_aug_dataset, 0, tokenizer, "hate")
+
+train_data = CustomDataset(train_dataset[:17842], hate_aug_dataset, 0, tokenizer) 
+test_data = CustomDataset(train_dataset[17842:], hate_aug_dataset, 0, tokenizer)
 
 print("TRAIN LENGTH: ", len(train_data))
 
-train(model, train_data, test_data, 0.00002, 0.001, 3, device)
+train(model, train_data, test_data, 0.000001, 0.001, 3, device)
 
 
 # torch.save(model.state_dict(), "./trained-model-states.pth")
