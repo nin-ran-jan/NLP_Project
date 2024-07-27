@@ -1,6 +1,6 @@
 # NLP_Project
-This is the project we made for our NLP course in IIIT-Delhi.
+NLP course project at IIIT-Delhi.
 
-The project dealt with **classifying sentences as hateful, offensive, or neither**.
+The project dealt with **classifying sentences as hateful, offensive, or neither**. A.K.A. **Multiclass Hate Speech Detection**.
 
 We implemented multiple **Transformer-based architectures** to achieve the results.
